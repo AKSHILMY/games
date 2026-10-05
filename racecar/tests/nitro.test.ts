@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { Track } from '../src/game/track';
 import { Car } from '../src/game/car';
 import type { Input } from '../src/input/controls';
+import { needsBrake } from './driver';
 
 const track = new Track();
 const DT = 1 / 60;
@@ -13,14 +14,28 @@ function newCar() {
   return c;
 }
 
-/** Follow the centre line; `extra` lets a test add nitro etc. */
+/** Follow the centre line, braking for corners; `extra` lets a test add nitro etc. */
 function drive(c: Car, seconds: number, extra: Partial<Input> = {}, onStep?: (t: number) => void) {
   for (let t = 0; t < seconds; t += DT) {
     const look = track.samples[(Math.max(0, c.idx) + 8) % track.count];
     let d = Math.atan2(look.x - c.x, look.z - c.z) - c.h;
     d = Math.atan2(Math.sin(d), Math.cos(d));
-    c.step(DT, { throttle: 1, brake: 0, steer: Math.max(-1, Math.min(1, -d * 3)), ...extra }, track);
+    const brake = needsBrake(track, c) ? 1 : 0;
+    c.step(DT, { throttle: 1 - brake, brake, steer: Math.max(-1, Math.min(1, -d * 3)), ...extra }, track);
     onStep?.(t);
+  }
+}
+
+/** Straight-line running: the car is held on one spot of the start straight, so only speed changes. */
+function cruise(c: Car, seconds: number, input: Partial<Input>, onStep?: () => void) {
+  const s = track.samples[track.count - 40];
+  const h = Math.atan2(s.tx, s.tz);
+  for (let t = 0; t < seconds; t += DT) {
+    onStep?.();
+    c.x = s.x;
+    c.z = s.z;
+    c.h = h;
+    c.step(DT, { throttle: 0, brake: 0, steer: 0, ...input }, track);
   }
 }
 
@@ -34,32 +49,47 @@ describe('nitro', () => {
     expect(c.nitro).toBeLessThan(1);
   });
 
-  it('fills to full within about one lap of clean driving', () => {
+  it('fills to full within about half a lap of clean driving', () => {
     const c = newCar();
     let fullAt = -1;
     drive(c, 60, {}, (t) => {
       if (fullAt < 0 && c.nitro >= 1) fullAt = t;
     });
-    expect(fullAt).toBeGreaterThan(15);
-    expect(fullAt).toBeLessThan(40); // a lap is ~33 s
+    expect(fullAt).toBeGreaterThan(12);
+    expect(fullAt).toBeLessThan(26); // a lap is ~36 s
     expect(c.nitroReady).toBe(true);
   });
 
-  it('gives ~3 s of boost, a higher top speed, then empties', () => {
+  it('gives ~3 s of boost and then empties', () => {
     const c = newCar();
-    drive(c, 40); // fill up and reach cruising speed
+    drive(c, 40); // fill up
     expect(c.nitroReady).toBe(true);
-    const before = c.forwardSpeed;
     let boostTime = 0;
-    let top = 0;
     drive(c, 5, { nitro: true }, () => {
       if (c.boosting) boostTime += DT;
-      top = Math.max(top, c.forwardSpeed);
     });
     expect(boostTime).toBeGreaterThan(2.9);
     expect(boostTime).toBeLessThan(3.1);
-    expect(top * 3.6).toBeGreaterThan(before * 3.6 + 15); // clearly faster than cruising
-    expect(c.nitro).toBeLessThan(0.1); // drained (refilling slowly again)
+    expect(c.nitro).toBeLessThan(0.2); // drained (2 s of refilling since)
+  });
+
+  it('lifts top speed to ~290 km/h, and the extra speed fades slowly, not all at once', () => {
+    const c = newCar();
+    cruise(c, 40, { throttle: 1 });
+    const top = c.forwardSpeed * 3.6;
+    expect(top).toBeGreaterThan(245);
+    expect(top).toBeLessThan(251); // 250 km/h top speed
+    c.nitro = 1;
+    cruise(c, 3, { throttle: 1, nitro: true });
+    const boosted = c.forwardSpeed * 3.6;
+    expect(boosted).toBeGreaterThan(top + 15);
+    // Still on the throttle: drag only bleeds the extra speed off gradually
+    cruise(c, 2, { throttle: 1 });
+    expect(c.forwardSpeed * 3.6).toBeGreaterThan(boosted - 15);
+    expect(c.forwardSpeed * 3.6).toBeGreaterThan(top + 5);
+    // Braking still scrubs it off fast
+    cruise(c, 1, { brake: 1 });
+    expect(c.forwardSpeed * 3.6).toBeLessThan(top - 60);
   });
 
   it('fills much slower on the grass', () => {
@@ -79,15 +109,10 @@ describe('slipstream', () => {
   it('a car in a slipstream reaches a higher top speed', () => {
     const solo = newCar();
     const tucked = newCar();
-    let soloTop = 0;
-    let tuckedTop = 0;
-    drive(solo, 25, {}, () => (soloTop = Math.max(soloTop, solo.forwardSpeed)));
-    drive(tucked, 25, {}, () => {
-      tucked.draft = 1;
-      tuckedTop = Math.max(tuckedTop, tucked.forwardSpeed);
-    });
-    expect(tuckedTop).toBeGreaterThan(soloTop * 1.04);
-    expect(tuckedTop).toBeLessThan(soloTop * 1.2); // a nudge, not a rocket
+    cruise(solo, 40, { throttle: 1 });
+    cruise(tucked, 40, { throttle: 1 }, () => (tucked.draft = 1));
+    expect(tucked.forwardSpeed).toBeGreaterThan(solo.forwardSpeed * 1.05);
+    expect(tucked.forwardSpeed).toBeLessThan(solo.forwardSpeed * 1.2); // a nudge, not a rocket
   });
 
   it('fills nitro faster', () => {

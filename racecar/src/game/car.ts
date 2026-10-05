@@ -3,22 +3,34 @@ import type { Input } from '../input/controls';
 
 export const CAR_RADIUS = 1.7;
 
-const MAX_SPEED = 52; // m/s on asphalt (~187 km/h)
-const ACCEL = 24;
-const BRAKE = 40;
+// Longitudinal model: thrust is limited by tyre traction at low speed and by engine power above
+// that (a = P / v), against aerodynamic drag (a = k·v²). Top speed is where the two balance, so a
+// car going faster than that (after nitro or a slipstream) bleeds speed off gradually instead of
+// hitting a wall.
+const TOP_SPEED = 250 / 3.6; // m/s on asphalt with the throttle flat
+const ACCEL = 14; // traction-limited launch, ~1.4 g: 0-100 km/h in about 2 s
+const POWER = 330; // engine power per kg of car (W/kg), like a junior single-seater
+const DRAG = POWER / TOP_SPEED ** 3; // aero drag coefficient per kg, chosen so P/v = k·v² at TOP_SPEED
+const OFFROAD_DRAG = 0.6; // extra drag on grass (per second), caps you around 90 km/h
+const COAST = 1.5; // rolling resistance + engine braking with no pedal pressed (m/s²)
+const BRAKE = 32; // ~3.3 g, a light single-seater on slicks
 const REVERSE_MAX = 12;
+const REVERSE_ACCEL = 12;
 const GRIP = 7; // how fast sideways velocity is killed; lower = more drift
 const TURN = 2.3; // rad/s at full lock
-const OFFROAD_MAX = 22;
+// Tyres can only hold so much sideways force, so yaw rate is capped at MAX_LAT / speed (a = v·ω).
+// About 2.6 g: hairpins need ~80 km/h, and taking a kink flat out at 250 km/h needs a ~185 m radius.
+const MAX_LAT = 26;
+/** Grip on a wet track relative to dry (wet asphalt gives roughly 70% of dry tyre grip). */
+export const WET_GRIP = 0.7;
 
 // Nitro: the bar fills with distance driven, and only a full bar can be fired
-const NITRO_FILL_DIST = 1100; // metres of clean road driving for a full bar (~¾ of a lap)
+const NITRO_FILL_DIST = 750; // metres of clean road driving for a full bar (about half a lap)
 const NITRO_TIME = 3; // seconds of boost from a full bar
-const NITRO_SPEED = 1.25; // top speed multiplier while boosting
+const NITRO_POWER = 1.56; // extra engine power while boosting: top speed x1.16, about 290 km/h
 const NITRO_ACCEL = 1.6;
-// Slipstream: following close behind another car cuts drag and fills nitro faster
-const DRAFT_DRAG_CUT = 0.4;
-const DRAFT_SPEED = 1.04;
+// Slipstream: following close behind another car cuts its aero drag (top speed +~10%) and fills nitro faster
+const DRAFT_DRAG_CUT = 0.25;
 
 /** Locally simulated car (the player's own). Remote cars are just interpolated meshes. */
 export class Car {
@@ -37,6 +49,8 @@ export class Car {
   boost = 0;
   /** Slipstream strength 0..1, set each step by the race from the cars ahead. */
   draft = 0;
+  /** Tyre grip for the conditions: 1 dry, WET_GRIP wet. Scales braking and cornering. */
+  grip = 1;
 
   reset(x: number, z: number, h: number) {
     this.x = x;
@@ -83,27 +97,30 @@ export class Car {
     const boost = this.boosting ? 1 : 0;
 
     const draft = this.offroad ? 0 : this.draft;
-    let maxSpeed = this.offroad ? OFFROAD_MAX : MAX_SPEED;
-    maxSpeed *= 1 + (NITRO_SPEED - 1) * boost + (DRAFT_SPEED - 1) * draft;
-    const accel = ACCEL * (boost ? NITRO_ACCEL : 1);
 
-    // Throttle / brake / reverse (nitro pushes even without throttle)
+    // Throttle: traction-limited, then power-limited (nitro pushes even without throttle)
     const push = Math.max(input.throttle, boost);
-    if (push > 0) vf += push * accel * (1 - Math.max(0, vf) / maxSpeed) * dt;
-    if (input.brake > 0) {
-      if (vf > 0.5) vf -= input.brake * BRAKE * dt;
-      else if (vf > -REVERSE_MAX) vf -= input.brake * ACCEL * 0.5 * dt;
+    if (push > 0) {
+      const traction = ACCEL * (boost ? NITRO_ACCEL : 1);
+      const power = POWER * (boost ? NITRO_POWER : 1);
+      vf += push * Math.min(traction, power / Math.max(1, Math.abs(vf))) * dt;
     }
-    // Rolling resistance, plus strong slowdown when over the off-road limit
-    vf -= vf * (this.offroad ? 0.6 : 0.08 * (1 - DRAFT_DRAG_CUT * draft)) * dt;
-    if (input.throttle === 0 && input.brake === 0) vf -= Math.sign(vf) * Math.min(Math.abs(vf), 3 * dt);
+    if (input.brake > 0) {
+      if (vf > 0.5) vf -= input.brake * BRAKE * this.grip * dt;
+      else if (vf > -REVERSE_MAX) vf -= input.brake * REVERSE_ACCEL * dt;
+    }
+    // Aero drag (less in a slipstream), heavy drag on grass, and coasting losses with no pedal pressed
+    vf -= (DRAG * (1 - DRAFT_DRAG_CUT * draft) * vf * Math.abs(vf) + (this.offroad ? OFFROAD_DRAG * vf : 0)) * dt;
+    if (input.throttle === 0 && input.brake === 0 && !boost) vf -= Math.sign(vf) * Math.min(Math.abs(vf), COAST * dt);
 
     // Lateral grip
-    vr *= Math.exp(-(this.offroad ? GRIP * 0.6 : GRIP) * dt);
+    const surface = (this.offroad ? 0.6 : 1) * this.grip;
+    vr *= Math.exp(-GRIP * surface * dt);
 
-    // Steering: needs some speed, softer at top speed, reversed when going backwards
-    const speedFactor = Math.min(1, Math.abs(vf) / 8) * (1 - 0.45 * Math.min(1, Math.abs(vf) / MAX_SPEED));
-    this.h -= input.steer * TURN * speedFactor * (boost ? 0.85 : 1) * Math.sign(vf) * dt;
+    // Steering: needs some speed, limited by tyre grip at speed, reversed when going backwards
+    const lock = TURN * Math.min(1, Math.abs(vf) / 8) * (boost ? 0.85 : 1);
+    const yaw = Math.min(lock, (MAX_LAT * surface) / Math.max(1, Math.abs(vf)));
+    this.h -= input.steer * yaw * Math.sign(vf) * dt;
 
     const nfx = Math.sin(this.h);
     const nfz = Math.cos(this.h);

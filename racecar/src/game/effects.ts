@@ -30,17 +30,26 @@ interface Puff {
   vz: number;
   size: number;
   grow: number;
-  dust: boolean;
+  alpha: number; // peak opacity
 }
 
+type PuffKind = 'smoke' | 'dust' | 'spray';
+// colour, peak opacity, start size, growth per second, base lifetime (s)
+const KINDS: Record<PuffKind, { rgb: [number, number, number]; alpha: number; size: number; grow: number; life: number }> = {
+  smoke: { rgb: [0.92, 0.92, 0.94], alpha: 0.5, size: 1.0, grow: 3.2, life: 1.1 },
+  dust: { rgb: [0.62, 0.5, 0.34], alpha: 0.55, size: 1.2, grow: 2.2, life: 0.9 },
+  spray: { rgb: [0.8, 0.84, 0.88], alpha: 0.32, size: 1.3, grow: 4, life: 0.5 },
+};
+
 /**
- * Tyre smoke, grass dust and skid marks for every car. Everything is drawn from fixed pools
+ * Tyre smoke, grass dust, rain spray and skid marks for every car. Everything is drawn from fixed pools
  * (one Points object, one skid-mark mesh) so effects cost two draw calls and no garbage.
  */
 export class Effects {
   readonly group = new THREE.Group();
   private puffs: Puff[] = [];
   private nextPuff = 0;
+  private live = 0; // puffs alive after the last step; 0 means the buffers already hold nothing to draw
   private points: THREE.Points;
   private pPos: Float32Array;
   private pSize: Float32Array;
@@ -54,9 +63,13 @@ export class Effects {
   private hints = new Map<string, number>();
   private emitAcc = new Map<string, number>();
 
-  constructor(private track: Track) {
+  /** `wet`: tyres throw up spray at speed and leave no skid marks. */
+  constructor(
+    private track: Track,
+    private wet = false,
+  ) {
     for (let i = 0; i < MAX_PUFFS; i++)
-      this.puffs.push({ life: 0, max: 1, x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, size: 1, grow: 1, dust: false });
+      this.puffs.push({ life: 0, max: 1, x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, size: 1, grow: 1, alpha: 0 });
 
     const g = new THREE.BufferGeometry();
     this.pPos = new Float32Array(MAX_PUFFS * 3);
@@ -119,6 +132,8 @@ export class Effects {
     const hardBrake = v.accel < -20 && speed > 8;
     const skid = !offroad && (sliding || hardBrake);
     const dust = offroad && speed > 4;
+    const spray = this.wet && !offroad && speed > 15;
+    const marks = skid && !this.wet; // standing water leaves no rubber on the road
 
     const sin = Math.sin(c.h);
     const cos = Math.cos(c.h);
@@ -128,45 +143,59 @@ export class Effects {
     const last = this.lastContact.get(c.id) ?? [null, null];
     contacts.forEach((pt, i) => {
       const prev = last[i];
-      if (skid && prev) {
+      if (marks && prev) {
         const d = Math.hypot(pt[0] - prev[0], pt[1] - prev[1]);
         if (d > 0.4 && d < 6) {
           this.addMark(prev, pt);
           last[i] = pt;
         }
-      } else last[i] = skid ? pt : null;
+      } else last[i] = marks ? pt : null;
     });
     this.lastContact.set(c.id, last);
 
-    // Smoke / dust puffs, rate grows with how hard the car is sliding
-    if (!skid && !dust) return;
-    const intensity = dust ? Math.min(1, speed / 25) : Math.min(1, (Math.abs(v.slide) + Math.max(0, -v.accel - 20) * 0.3) / 12);
-    const rate = (dust ? 30 : 45) * intensity; // puffs per second per wheel
+    // Dust off-road; spray in the wet; otherwise smoke, with a rate that grows with how hard the car is sliding
+    if (!skid && !dust && !spray) return;
+    const kind: PuffKind = dust ? 'dust' : spray ? 'spray' : 'smoke';
+    const intensity =
+      kind === 'dust'
+        ? Math.min(1, speed / 25)
+        : kind === 'spray'
+          ? Math.min(1, speed / 45)
+          : Math.min(1, (Math.abs(v.slide) + Math.max(0, -v.accel - 20) * 0.3) / 12);
+    const rate = (kind === 'smoke' ? 45 : 30) * intensity; // puffs per second per wheel
     let acc = (this.emitAcc.get(c.id) ?? 0) + rate * dt;
     while (acc >= 1) {
       acc -= 1;
-      for (const pt of contacts) this.spawn(pt[0], pt[1], dust, c.h, speed);
+      for (const pt of contacts) this.spawn(pt[0], pt[1], kind, c.h, speed);
     }
     this.emitAcc.set(c.id, acc);
   }
 
-  private spawn(x: number, z: number, dust: boolean, h: number, speed: number) {
-    const p = this.puffs[this.nextPuff];
-    this.nextPuff = (this.nextPuff + 1) % MAX_PUFFS;
+  private spawn(x: number, z: number, kind: PuffKind, h: number, speed: number) {
+    const k = KINDS[kind];
+    const i = this.nextPuff;
+    const p = this.puffs[i];
+    this.nextPuff = (i + 1) % MAX_PUFFS;
+    this.live++;
+    // Colour only changes here, so it is uploaded on spawn rather than every frame
+    this.pColor.set(k.rgb, i * 3);
+    this.points.geometry.attributes.color.needsUpdate = true;
     const back = Math.min(8, speed * 0.15);
-    p.life = p.max = dust ? 0.9 + Math.random() * 0.5 : 1.1 + Math.random() * 0.7;
+    p.life = p.max = k.life * (1 + Math.random() * 0.6);
     p.x = x + (Math.random() - 0.5) * 0.4;
     p.y = 0.35;
     p.z = z + (Math.random() - 0.5) * 0.4;
     p.vx = -Math.sin(h) * back + (Math.random() - 0.5) * 1.5;
     p.vz = -Math.cos(h) * back + (Math.random() - 0.5) * 1.5;
     p.vy = 0.6 + Math.random() * 0.8;
-    p.size = dust ? 1.2 : 1.0;
-    p.grow = dust ? 2.2 : 3.2;
-    p.dust = dust;
+    p.size = k.size;
+    p.grow = k.grow;
+    p.alpha = k.alpha;
   }
 
   private stepPuffs(dt: number) {
+    if (!this.live) return; // nothing alive, and the buffers were already cleared
+    let live = 0;
     const drag = Math.exp(-2.5 * dt);
     for (let i = 0; i < MAX_PUFFS; i++) {
       const p = this.puffs[i];
@@ -180,20 +209,19 @@ export class Effects {
         p.size += p.grow * dt;
       }
       const alive = p.life > 0;
+      if (alive) live++;
       const t = alive ? p.life / p.max : 0; // 1 → 0
       this.pPos[i * 3] = p.x;
       this.pPos[i * 3 + 1] = p.y;
       this.pPos[i * 3 + 2] = p.z;
       this.pSize[i] = alive ? p.size : 0;
-      this.pAlpha[i] = alive ? (p.dust ? 0.55 : 0.5) * t * Math.min(1, (1 - t) * 8) : 0;
-      if (p.dust) this.pColor.set([0.62, 0.5, 0.34], i * 3);
-      else this.pColor.set([0.92, 0.92, 0.94], i * 3);
+      this.pAlpha[i] = alive ? p.alpha * t * Math.min(1, (1 - t) * 8) : 0;
     }
+    this.live = live;
     const g = this.points.geometry;
     g.attributes.position.needsUpdate = true;
     g.attributes.size.needsUpdate = true;
     g.attributes.alpha.needsUpdate = true;
-    g.attributes.color.needsUpdate = true;
   }
 
   private addMark(a: [number, number], b: [number, number]) {
@@ -207,8 +235,11 @@ export class Effects {
       [a[0] + nx, y, a[1] + nz, a[0] - nx, y, a[1] - nz, b[0] + nx, y, b[1] + nz, b[0] - nx, y, b[1] - nz],
       this.nextMark * 12,
     );
+    // Upload just this segment, not the whole 700-segment buffer
+    const attr = this.marks.geometry.attributes.position as THREE.BufferAttribute;
+    attr.addUpdateRange(this.nextMark * 12, 12);
+    attr.needsUpdate = true;
     this.nextMark = (this.nextMark + 1) % MAX_MARKS;
-    this.marks.geometry.attributes.position.needsUpdate = true;
   }
 
   dispose(scene: THREE.Scene) {

@@ -1,4 +1,5 @@
 import type { HudInfo, Standing } from '../game/race';
+import { rankStandings } from '../game/standings';
 import type { Track } from '../game/track';
 import type { PlayerInfo, ResultRow } from '../net/protocol';
 
@@ -47,16 +48,31 @@ export function fmtTime(ms: number): string {
   return `${m}:${s.toFixed(1).padStart(4, '0')}`;
 }
 
-/** Final/live results: podium for the top 3 finishers, then everyone by time / progress. */
-export function renderResults(rows: ResultRow[], standings: Standing[], myId: string) {
+const shownHtml = new Map<string, string>();
+/** Set innerHTML only when it changed (results are refreshed every frame while they are open). */
+function setHtml(id: string, html: string) {
+  if (shownHtml.get(id) === html) return;
+  shownHtml.set(id, html);
+  $(id).innerHTML = html;
+}
+
+/**
+ * Live results: podium for the top 3 finishers, then everyone by finish time, then by distance.
+ * Uses the host's finish times when known, otherwise the time each car reported itself, so a
+ * finisher shows up straight away. Returns `place` (1-based) and how many are still racing.
+ */
+export function renderResults(
+  rows: ResultRow[],
+  standings: Standing[],
+  myId: string,
+  closed = false, // race closed: anyone without a time did not finish
+): { place: number; racing: number } {
   const done = new Map(rows.map((r) => [r.id, r.time]));
-  const ordered = [
-    ...rows.map((r) => standings.find((s) => s.id === r.id)).filter((s): s is Standing => !!s),
-    ...standings.filter((s) => !done.has(s.id)),
-  ];
+  const ordered = rankStandings(standings.map((s) => ({ ...s, fin: done.get(s.id) ?? s.fin })));
   // Podium order on screen: 2nd, 1st, 3rd
-  const finishers = ordered.filter((s) => done.has(s.id)).slice(0, 3);
-  $('podium').innerHTML =
+  const finishers = ordered.filter((s) => s.fin).slice(0, 3);
+  setHtml(
+    'podium',
     finishers.length > 1
       ? [1, 0, 2]
           .filter((i) => finishers[i])
@@ -64,20 +80,23 @@ export function renderResults(rows: ResultRow[], standings: Standing[], myId: st
             const s = finishers[i];
             return (
               `<div class="step p${i + 1}"><div class="who">${dot(s.color)}<b>${esc(s.name)}</b>` +
-              `<small>${fmtTime(done.get(s.id)!)}</small></div><div class="block">${i + 1}</div></div>`
+              `<small>${fmtTime(s.fin)}</small></div><div class="block">${i + 1}</div></div>`
             );
           })
           .join('')
-      : '';
-  $('resultList').innerHTML = ordered
-    .map((s, i) => {
-      const t = done.get(s.id);
-      return (
-        `<li class="${s.id === myId ? 'me' : ''}"><span class="rank">${i + 1}</span>${dot(s.color)}` +
-        `<span>${esc(s.name)}</span><span class="tagline">${t ? fmtTime(t) : 'racing…'}</span></li>`
-      );
-    })
-    .join('');
+      : '',
+  );
+  setHtml(
+    'resultList',
+    ordered
+      .map(
+        (s, i) =>
+          `<li class="${s.id === myId ? 'me' : ''}"><span class="rank">${i + 1}</span>${dot(s.color)}` +
+          `<span>${esc(s.name)}</span><span class="tagline">${s.fin ? fmtTime(s.fin) : closed ? 'DNF' : 'racing…'}</span></li>`,
+      )
+      .join(''),
+  );
+  return { place: ordered.findIndex((s) => s.id === myId) + 1, racing: ordered.filter((s) => !s.fin).length };
 }
 
 /** Burst of CSS confetti (cleans itself up). */
@@ -97,11 +116,11 @@ export function confetti() {
   setTimeout(() => (box.innerHTML = ''), 5000);
 }
 
-/** Analogue speedometer: 0–220 km/h dial with needle and digital readout. */
+/** Analogue speedometer: 0–300 km/h dial with needle and digital readout. */
 class Speedo {
   private c: CanvasRenderingContext2D;
   private face: HTMLCanvasElement;
-  private static MAX = 220;
+  private static MAX = 300;
   private static A0 = Math.PI * 0.75; // start angle (bottom-left)
   private static SWEEP = Math.PI * 1.5;
 
@@ -122,7 +141,7 @@ class Speedo {
     f.strokeStyle = 'rgba(230,57,70,0.85)';
     f.lineWidth = 8;
     f.beginPath();
-    f.arc(cx, cx, r - 6, this.angle(180), this.angle(220));
+    f.arc(cx, cx, r - 6, this.angle(250), this.angle(300)); // above normal top speed: nitro / slipstream
     f.stroke();
     f.fillStyle = '#f1f5f9';
     f.strokeStyle = '#f1f5f9';
@@ -131,7 +150,7 @@ class Speedo {
     f.textBaseline = 'middle';
     for (let v = 0; v <= Speedo.MAX; v += 10) {
       const a = this.angle(v);
-      const major = v % 40 === 0;
+      const major = v % 50 === 0;
       f.lineWidth = major ? 3 : 1.5;
       f.beginPath();
       f.moveTo(cx + Math.cos(a) * (r - (major ? 14 : 8)), cx + Math.sin(a) * (r - (major ? 14 : 8)));
@@ -176,8 +195,8 @@ class Speedo {
 export class Hud {
   private last: Record<string, string> = {};
   private map: CanvasRenderingContext2D;
-  private base: HTMLCanvasElement;
-  private toMap: (x: number, z: number) => [number, number];
+  private base = document.createElement('canvas');
+  private toMap: (x: number, z: number) => [number, number] = () => [0, 0];
   private lastMap = 0;
   private lastKmh = -1;
   private lastNitro = -1;
@@ -186,8 +205,13 @@ export class Hud {
   private speedo = new Speedo($<HTMLCanvasElement>('speedo'));
 
   constructor(track: Track) {
-    const cv = $<HTMLCanvasElement>('minimap');
-    this.map = cv.getContext('2d')!;
+    this.map = $<HTMLCanvasElement>('minimap').getContext('2d')!;
+    this.setTrack(track);
+  }
+
+  /** Redraw the minimap's track outline (on start-up and when the circuit changes). */
+  setTrack(track: Track) {
+    const cv = this.map.canvas;
     let minX = Infinity,
       maxX = -Infinity,
       minZ = Infinity,
@@ -205,7 +229,6 @@ export class Hud {
     // Top-down view of the track (viewed from above, rotated 180° so the start straight runs left→right)
     this.toMap = (x, z) => [cv.width - (ox + (x - minX) * scale), cv.height - (oz + (z - minZ) * scale)];
 
-    this.base = document.createElement('canvas');
     this.base.width = cv.width;
     this.base.height = cv.height;
     const b = this.base.getContext('2d')!;

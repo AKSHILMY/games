@@ -1,9 +1,9 @@
-import { Car } from './car';
+import { Car, WET_GRIP } from './car';
 import { CarVisual } from './carModel';
 import { LapCounter, type Track } from './track';
 import type { Stage } from './scene';
 import { readInput, type Input } from '../input/controls';
-import type { CarState, PlayerInfo } from '../net/protocol';
+import type { CarState, PlayerInfo, RaceConfig } from '../net/protocol';
 import { rankStandings, type Standing } from './standings';
 import { RemotePose, angleDiff, type Pose } from './remotePose';
 import { Effects } from './effects';
@@ -77,15 +77,19 @@ export class Race {
   private lastCount = '';
   private wasReady = false;
   private readyFlashAt = 0;
+  private totalLaps: number;
+  private retired = false;
 
   constructor(
     private stage: Stage,
     private track: Track,
     myId: string,
     players: PlayerInfo[],
-    private totalLaps: number,
+    cfg: RaceConfig,
     private hooks: RaceHooks,
   ) {
+    this.totalLaps = cfg.laps;
+    this.car.grip = cfg.wet ? WET_GRIP : 1;
     this.laps = new LapCounter(track.count);
     this.me = players.find((p) => p.id === myId) ?? { id: myId, name: 'You', color: 0xffffff };
 
@@ -110,7 +114,7 @@ export class Race {
       this.remotes.set(p.id, { info: p, visual, motion: new RemotePose(pose), pose, braking: false, boosting: false });
     });
 
-    this.effects = new Effects(track);
+    this.effects = new Effects(track, cfg.wet);
     stage.scene.add(this.effects.group);
 
     this.startAt = performance.now() + COUNTDOWN + 500;
@@ -153,6 +157,15 @@ export class Race {
     return best;
   }
 
+  get finished(): boolean {
+    return this.finishTime > 0;
+  }
+
+  /** The race closed before we finished: coast to a stop (did not finish). */
+  retire() {
+    this.retired = true;
+  }
+
   /** Switch every car between real shadows and cheap blob shadows. */
   setShadows(on: boolean) {
     this.visual.setShadows(on);
@@ -179,7 +192,8 @@ export class Race {
     while (this.acc >= STEP) {
       this.acc -= STEP;
       let input = racing ? readInput() : NO_INPUT;
-      if (this.finishTime) input = { throttle: 0, brake: 0.2, steer: 0 };
+      // Race over: brake gently to a stop, then let go (holding brake at a standstill means reverse)
+      if (this.finishTime || this.retired) input = { throttle: 0, brake: this.car.forwardSpeed > 0.5 ? 0.3 : 0, steer: 0 };
       this.lastInput = input;
       this.braking = input.brake > 0 && this.car.forwardSpeed > 0.5;
       this.prev = { x: this.car.x, z: this.car.z, h: this.car.h };

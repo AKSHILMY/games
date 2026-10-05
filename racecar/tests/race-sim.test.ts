@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { Track, LapCounter } from '../src/game/track';
-import { Car } from '../src/game/car';
+import { Track, LapCounter, CIRCUITS, WALL } from '../src/game/track';
+import { Car, WET_GRIP } from '../src/game/car';
 import { rankStandings, type Standing } from '../src/game/standings';
+import { needsBrake, radiusAt } from './driver';
 
 // Drives real Car physics + LapCounter around the real track with a simple autopilot,
 // then checks positions, lap counting, finish order and speed stats.
@@ -73,7 +74,7 @@ describe('race simulation', () => {
     });
     expect(kmhAt3s).toBeGreaterThan(100); // 0→100+ km/h in 3 s
     expect(r.maxKmh).toBeGreaterThan(140);
-    expect(r.maxKmh).toBeLessThan(190); // MAX_SPEED cap ~187 km/h
+    expect(r.maxKmh).toBeLessThan(251); // top speed 250 km/h
     expect(r.lapTimes).toHaveLength(2);
     const lap1 = r.lapTimes[0];
     const lap2 = r.lapTimes[1] - r.lapTimes[0];
@@ -136,6 +137,24 @@ describe('race simulation', () => {
     expect(r.laps.lap).toBe(0);
   });
 
+  it('a lap still counts when the first frame arrives before any physics step', () => {
+    const r = makeRacer('fast-screen', 0, 1);
+    r.laps.update(r.car.idx); // car.idx is -1 until the car has stepped once (120 Hz first frame)
+    runRace([r], 1);
+    expect(r.laps.lap).toBe(1);
+    expect(r.fin).toBeGreaterThan(0);
+  });
+
+  it('after the finish the car brakes to a stop and stays there (no creeping backwards)', () => {
+    const r = makeRacer('done', 0, 1);
+    for (let i = 0; i < 240; i++) r.car.step(DT, { throttle: 1, brake: 0, steer: 0 }, track);
+    // same rule the race uses once you have finished
+    for (let i = 0; i < 60 * 15; i++) {
+      r.car.step(DT, { throttle: 0, brake: r.car.forwardSpeed > 0.5 ? 0.3 : 0, steer: 0 }, track);
+    }
+    expect(Math.abs(r.car.forwardSpeed)).toBeLessThan(0.1);
+  });
+
   it('cars collide instead of driving through each other', () => {
     // fast car directly behind a slow one (grid slots 0 and 2 are on the same side)
     const slow = makeRacer('slow', 0, 0.4);
@@ -157,5 +176,94 @@ describe('race simulation', () => {
       worst = Math.max(worst, Math.abs(track.project(r.car.x, r.car.z, r.car.idx).offset));
     });
     expect(worst).toBeLessThan(13);
+  });
+});
+
+/** A tidier driver: follows the centre line and brakes in time for the corners ahead. */
+function lapWithBraking(t: Track, grip: number, laps = 2) {
+  const car = new Car();
+  car.grip = grip;
+  const g = t.gridSlot(0);
+  car.reset(g.x, g.z, g.h);
+  const counter = new LapCounter(t.count);
+  counter.reset(t.project(g.x, g.z).idx);
+  const lapTimes: number[] = [];
+  let time = 0;
+  let wallHits = 0;
+  while (time < 300 && counter.lap < laps) {
+    const i0 = Math.max(0, car.idx);
+    const look = t.samples[(i0 + 8) % t.count];
+    let d = Math.atan2(look.x - car.x, look.z - car.z) - car.h;
+    d = Math.atan2(Math.sin(d), Math.cos(d));
+    const brake = needsBrake(t, car) ? 1 : 0;
+    car.step(DT, { throttle: brake ? 0 : 1, brake, steer: Math.max(-1, Math.min(1, -d * 3)) }, t);
+    if (car.impact > 0) wallHits++;
+    car.impact = 0;
+    const before = counter.lap;
+    counter.update(car.idx);
+    if (counter.lap > before) lapTimes.push(time);
+    time += DT;
+  }
+  return { lapTimes, wallHits };
+}
+
+describe('circuits', () => {
+  CIRCUITS.forEach((c, i) => {
+    const t = new Track(i);
+
+    it(`${c.name}: sections never overlap and corners are drivable`, () => {
+      let minR = Infinity;
+      for (let a = 0; a < t.count; a++) {
+        minR = Math.min(minR, radiusAt(t, a));
+        for (let b = a + 1; b < t.count; b++) {
+          const arc = Math.min(b - a, t.count - (b - a)) * t.step;
+          if (arc < 100) continue;
+          const sa = t.samples[a];
+          const sb = t.samples[b];
+          // barriers of separate sections must not touch (plus room for scenery between them)
+          expect(Math.hypot(sa.x - sb.x, sa.z - sb.z)).toBeGreaterThan(WALL * 2 + 20);
+        }
+      }
+      expect(minR).toBeGreaterThan(15);
+    });
+
+    it(`${c.name}: a careful driver laps it in the dry without touching a wall`, () => {
+      const { lapTimes, wallHits } = lapWithBraking(t, 1);
+      expect(lapTimes).toHaveLength(2);
+      const lap2 = lapTimes[1] - lapTimes[0];
+      expect(lap2).toBeGreaterThan(25);
+      expect(lap2).toBeLessThan(60);
+      expect(wallHits).toBe(0);
+    });
+
+    it(`${c.name}: the same driver is slower in the wet`, () => {
+      const dry = lapWithBraking(t, 1).lapTimes;
+      const wet = lapWithBraking(t, WET_GRIP).lapTimes;
+      expect(wet).toHaveLength(2);
+      expect(wet[1] - wet[0]).toBeGreaterThan((dry[1] - dry[0]) * 1.05);
+    });
+  });
+});
+
+describe('tyre grip', () => {
+  function cornerAt(speed: number, grip: number) {
+    const t = new Track();
+    const s = t.samples[t.count - 30]; // start straight
+    const car = new Car();
+    car.grip = grip;
+    const h = Math.atan2(s.tx, s.tz);
+    car.reset(s.x, s.z, h);
+    car.vx = Math.sin(h) * speed;
+    car.vz = Math.cos(h) * speed;
+    car.step(DT, { throttle: 0, brake: 0, steer: 1 }, t);
+    return (Math.abs(car.h - h) / DT) * car.speed; // lateral acceleration v·ω, m/s²
+  }
+
+  it('limits cornering force at speed, so fast corners need braking', () => {
+    expect(cornerAt(50, 1)).toBeLessThan(26.5); // ~2.6 g
+    expect(cornerAt(50, 1)).toBeGreaterThan(24);
+    expect(cornerAt(50, WET_GRIP)).toBeLessThan(26.5 * WET_GRIP);
+    // At hairpin speed the tyres still allow a tight turn
+    expect(cornerAt(20, 1) / 20).toBeGreaterThan(1.2); // rad/s
   });
 });

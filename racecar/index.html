@@ -58,8 +58,19 @@
           </div>
         </div>
         <ul id="players"></ul>
-        <div id="hostCtl" class="row spread">
-          <label class="field inline">
+        <p id="raceInfo" class="small"></p>
+        <div id="hostCtl">
+          <label class="field circuit">
+            <span>Circuit</span>
+            <select id="circuit"></select>
+          </label>
+          <label class="field">
+            <span>Weather</span>
+            <select id="weather">
+              <option value="dry">Dry</option><option value="wet">Wet</option>
+            </select>
+          </label>
+          <label class="field">
             <span>Laps</span>
             <select id="laps">
               <option>1</option><option>2</option><option selected>3</option><option>4</option><option>5</option>

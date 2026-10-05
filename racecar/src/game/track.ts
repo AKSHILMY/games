@@ -4,11 +4,44 @@ export const ROAD_HALF = 8; // half road width (m)
 export const WALL = 13; // lateral distance of the barrier from the centre line
 const SAMPLES = 480;
 
-// Closed loop control points (x, z), metres. Hand-shaped for a mix of fast sweepers and a hairpin.
-const CONTROL: [number, number][] = [
-  [0, -160], [120, -170], [210, -120], [230, -30], [180, 30], [110, 40], [80, 90],
-  [120, 150], [100, 210], [10, 230], [-70, 190], [-90, 120], [-170, 100], [-220, 30],
-  [-200, -60], [-130, -110], [-70, -150],
+export interface Circuit {
+  name: string;
+  blurb: string;
+  /** Closed loop control points (x, z), metres. The first two points form the start straight. */
+  points: [number, number][];
+}
+
+// All circuits fit the same ~460 x 400 m plot (so scenery, hills and the menu fly-over work for each),
+// keep every section at least 75 m from any other part of the track, and have no corner tighter
+// than about 16 m radius.
+export const CIRCUITS: Circuit[] = [
+  {
+    name: 'Greenvale GP',
+    blurb: '1.4 km · fast sweepers and one hairpin',
+    points: [
+      [0, -160], [120, -170], [210, -120], [230, -30], [180, 30], [110, 40], [80, 90],
+      [120, 150], [100, 210], [10, 230], [-70, 190], [-90, 120], [-170, 100], [-220, 30],
+      [-200, -60], [-130, -110], [-70, -150],
+    ],
+  },
+  {
+    name: 'Harbour Speedway',
+    blurb: '1.6 km · two long straights, a chicane and heavy braking zones',
+    points: [
+      [-60, -165], [60, -165], [160, -160], [215, -120], [225, -50], [200, 0], [205, 60],
+      [225, 130], [190, 195], [120, 215], [70, 200], [40, 220], [-10, 225], [-120, 215],
+      [-190, 180], [-200, 120], [-150, 80], [-175, 20], [-225, -40], [-210, -120], [-150, -160],
+    ],
+  },
+  {
+    name: 'Canyon Ring',
+    blurb: '1.6 km · technical, tight esses and two hairpins',
+    points: [
+      [-40, -150], [70, -150], [140, -130], [160, -80], [120, -40], [150, 10], [215, 30],
+      [225, 100], [175, 140], [110, 110], [60, 140], [70, 205], [0, 230], [-60, 190],
+      [-50, 120], [-120, 90], [-200, 110], [-225, 40], [-170, -10], [-200, -80], [-150, -140],
+    ],
+  },
 ];
 
 export interface Sample {
@@ -30,10 +63,11 @@ export class Track {
   readonly samples: Sample[] = [];
   readonly length: number;
   readonly group = new THREE.Group();
+  private roadMat!: THREE.MeshLambertMaterial;
 
-  constructor() {
+  constructor(readonly circuit = 0) {
     const curve = new THREE.CatmullRomCurve3(
-      CONTROL.map(([x, z]) => new THREE.Vector3(x, 0, z)),
+      CIRCUITS[circuit].points.map(([x, z]) => new THREE.Vector3(x, 0, z)),
       true,
       'centripetal',
     );
@@ -94,6 +128,11 @@ export class Track {
     return { x: s.x + s.nx * lat, z: s.z + s.nz * lat, h: Math.atan2(s.tx, s.tz) };
   }
 
+  /** Wet asphalt is noticeably darker. */
+  setWet(wet: boolean) {
+    this.roadMat.color.setScalar(wet ? 0.62 : 1);
+  }
+
   private buildMeshes() {
     const n = SAMPLES;
     const S = this.samples;
@@ -147,7 +186,8 @@ export class Track {
     // Road surface (ribbon from right edge to left edge, so normals point up)
     const roadTex = noiseTexture(256, [58, 61, 66], 16, 0.04);
     roadTex.repeat.set(2, 1);
-    add(ribbon(-ROAD_HALF, ROAD_HALF, 0.02, 0.02, () => white), new THREE.MeshLambertMaterial({ map: roadTex }));
+    this.roadMat = new THREE.MeshLambertMaterial({ map: roadTex });
+    add(ribbon(-ROAD_HALF, ROAD_HALF, 0.02, 0.02, () => white), this.roadMat);
     // Solid white edge lines
     add(ribbon(ROAD_HALF - 0.7, ROAD_HALF - 0.4, 0.03, 0.03, () => white));
     add(ribbon(-ROAD_HALF + 0.4, -ROAD_HALF + 0.7, 0.03, 0.03, () => white));
@@ -277,6 +317,9 @@ export class LapCounter {
   }
 
   update(idx: number) {
+    // -1 = the car hasn't been placed on the track yet (no physics step has run, e.g. the first
+    // frame on a 120 Hz screen). `1 << -1` would set the sign bit and no lap could ever count.
+    if (idx < 0) return;
     const n = this.n;
     this.quarters |= 1 << Math.floor((idx / n) * 4);
     const prev = this.idx;

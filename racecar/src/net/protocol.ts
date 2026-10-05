@@ -23,6 +23,13 @@ export interface CarState {
   nb: number; // 1 while boosting (exhaust flames)
 }
 
+/** Race settings chosen by the host. */
+export interface RaceConfig {
+  laps: number;
+  track: number; // index into CIRCUITS
+  wet: boolean;
+}
+
 export interface ResultRow {
   id: string;
   time: number; // ms, 0 = did not finish
@@ -34,8 +41,8 @@ export type Msg =
   | { t: 'state'; s: CarState }
   | { t: 'finish'; time: number }
   // host → guests
-  | { t: 'lobby'; players: PlayerInfo[]; laps: number; racing: boolean }
-  | { t: 'start'; laps: number; players: PlayerInfo[] }
+  | { t: 'lobby'; players: PlayerInfo[]; cfg: RaceConfig; racing: boolean }
+  | { t: 'start'; cfg: RaceConfig; players: PlayerInfo[] }
   | { t: 'snap'; s: CarState[] }
   | { t: 'results'; rows: ResultRow[] }
   | { t: 'full' };

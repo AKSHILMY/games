@@ -4,6 +4,12 @@ import { isTouch } from '../input/controls';
 
 export type Quality = 'high' | 'low';
 
+// Sky and light for each weather: horizon/fog colour, sky top, fog range, sun and ambient strength
+const WEATHER = {
+  dry: { horizon: 0xcfe6f2, top: 0x3d8fd6, fog: [160, 700], sun: 2.6, ambient: 1.3 },
+  wet: { horizon: 0x9aa5ad, top: 0x5d6b78, fog: [50, 420], sun: 0.7, ambient: 1.5 },
+} as const;
+
 const SUN_DIR = new THREE.Vector3(-0.55, 0.62, 0.55).normalize();
 const SHADOW_RANGE = 40; // metres covered by the shadow map around the player
 
@@ -12,7 +18,8 @@ export class Stage {
   readonly scene = new THREE.Scene();
   readonly camera = new THREE.PerspectiveCamera(65, 1, 0.5, 900);
   private sun: THREE.DirectionalLight;
-  private sky: THREE.Mesh;
+  private ambient: THREE.HemisphereLight;
+  private sky: THREE.Mesh<THREE.SphereGeometry, THREE.ShaderMaterial>;
   private camPos = new THREE.Vector3();
   private camLook = new THREE.Vector3();
   private want = new THREE.Vector3();
@@ -45,7 +52,8 @@ export class Stage {
     this.scene.environmentIntensity = 0.6;
     pmrem.dispose();
 
-    this.scene.add(new THREE.HemisphereLight(0xd8ecff, 0x5b7a3c, 1.3));
+    this.ambient = new THREE.HemisphereLight(0xd8ecff, 0x5b7a3c, 1.3);
+    this.scene.add(this.ambient);
     this.sun = new THREE.DirectionalLight(0xfff1dc, 2.6);
     this.sun.position.copy(SUN_DIR).multiplyScalar(120);
     const sc = this.sun.shadow.camera;
@@ -61,6 +69,19 @@ export class Stage {
     this.applyQuality();
     addEventListener('resize', () => this.resize());
     this.resize();
+  }
+
+  /** Overcast, misty look for wet races; clear sky otherwise. */
+  setWeather(wet: boolean) {
+    const w = wet ? WEATHER.wet : WEATHER.dry;
+    const fog = this.scene.fog as THREE.Fog;
+    fog.color.setHex(w.horizon);
+    [fog.near, fog.far] = w.fog;
+    (this.scene.background as THREE.Color).setHex(w.horizon);
+    this.sky.material.uniforms.top.value.setHex(w.top);
+    this.sky.material.uniforms.sunGlow.value = wet ? 0 : 1;
+    this.sun.intensity = w.sun;
+    this.ambient.intensity = w.ambient;
   }
 
   get shadows(): boolean {
@@ -154,7 +175,7 @@ export class Stage {
 }
 
 /** Big gradient dome with a soft sun glow; cheaper than a real atmosphere shader. */
-function makeSky(horizon: THREE.Color): THREE.Mesh {
+function makeSky(horizon: THREE.Color): THREE.Mesh<THREE.SphereGeometry, THREE.ShaderMaterial> {
   const mat = new THREE.ShaderMaterial({
     side: THREE.BackSide,
     depthWrite: false,
@@ -163,6 +184,7 @@ function makeSky(horizon: THREE.Color): THREE.Mesh {
       top: { value: new THREE.Color(0x3d8fd6) },
       horizon: { value: horizon },
       sunDir: { value: SUN_DIR },
+      sunGlow: { value: 1 },
     },
     vertexShader: /* glsl */ `
       varying vec3 vDir;
@@ -172,13 +194,13 @@ function makeSky(horizon: THREE.Color): THREE.Mesh {
         gl_Position = p.xyww; // always at the far plane
       }`,
     fragmentShader: /* glsl */ `
-      uniform vec3 top; uniform vec3 horizon; uniform vec3 sunDir;
+      uniform vec3 top; uniform vec3 horizon; uniform vec3 sunDir; uniform float sunGlow;
       varying vec3 vDir;
       void main() {
         float h = max(vDir.y, 0.0);
         vec3 col = mix(horizon, top, pow(h, 0.55));
         float s = max(dot(normalize(vDir), sunDir), 0.0);
-        col += vec3(1.0, 0.9, 0.7) * (pow(s, 600.0) * 2.0 + pow(s, 12.0) * 0.25);
+        col += vec3(1.0, 0.9, 0.7) * (pow(s, 600.0) * 2.0 + pow(s, 12.0) * 0.25) * sunGlow;
         gl_FragColor = vec4(col, 1.0);
         #include <colorspace_fragment>
       }`,
@@ -187,4 +209,16 @@ function makeSky(horizon: THREE.Color): THREE.Mesh {
   sky.frustumCulled = false;
   sky.renderOrder = -1;
   return sky;
+}
+
+/** Free the GPU resources of everything under `root` (geometries, materials and their textures). */
+export function disposeTree(root: THREE.Object3D) {
+  root.traverse((o) => {
+    const m = o as THREE.Mesh;
+    m.geometry?.dispose();
+    for (const mat of [m.material ?? []].flat()) {
+      for (const v of Object.values(mat)) if (v instanceof THREE.Texture) v.dispose();
+      mat.dispose();
+    }
+  });
 }

@@ -1,20 +1,21 @@
 import { Net } from './peer';
-import { COLORS, MAX_PLAYERS, type CarState, type Msg, type PlayerInfo, type ResultRow } from './protocol';
+import { CIRCUITS } from '../game/track';
+import { COLORS, MAX_PLAYERS, type CarState, type Msg, type PlayerInfo, type RaceConfig, type ResultRow } from './protocol';
 
 /** What the UI and race loop need from a room, whether we are the host or a guest. */
 export interface Session {
   readonly isHost: boolean;
   readonly code: string;
   readonly myId: string;
-  onLobby: (players: PlayerInfo[], laps: number, racing: boolean) => void;
-  onStart: (players: PlayerInfo[], laps: number) => void;
+  onLobby: (players: PlayerInfo[], cfg: RaceConfig, racing: boolean) => void;
+  onStart: (players: PlayerInfo[], cfg: RaceConfig) => void;
   onSnap: (states: CarState[]) => void;
   onResults: (rows: ResultRow[]) => void;
   onEnd: (reason: string) => void;
   sendState(s: CarState): void;
   sendFinish(time: number): void;
   // host only
-  setLaps(laps: number): void;
+  configure(change: Partial<RaceConfig>): void;
   startRace(): void;
   backToLobby(): void;
   leave(): void;
@@ -31,7 +32,7 @@ export class HostSession implements Session {
   onEnd: Session['onEnd'] = noop;
 
   private players: PlayerInfo[] = [];
-  private laps = 3;
+  private cfg: RaceConfig = { laps: 3, track: 0, wet: false };
   private racing = false;
   private racers = new Set<string>();
   private results: ResultRow[] = [];
@@ -90,9 +91,9 @@ export class HostSession implements Session {
   }
 
   private pushLobby() {
-    const msg: Msg = { t: 'lobby', players: this.players, laps: this.laps, racing: this.racing };
+    const msg: Msg = { t: 'lobby', players: this.players, cfg: this.cfg, racing: this.racing };
     this.net.broadcast(msg);
-    this.onLobby(this.players, this.laps, this.racing);
+    this.onLobby(this.players, this.cfg, this.racing);
   }
 
   private recordFinish(id: string, time: number) {
@@ -107,8 +108,13 @@ export class HostSession implements Session {
     this.onResults(this.results);
   }
 
-  setLaps(laps: number) {
-    this.laps = Math.max(1, Math.min(10, laps));
+  configure(change: Partial<RaceConfig>) {
+    const c = { ...this.cfg, ...change };
+    this.cfg = {
+      laps: Math.max(1, Math.min(10, Math.round(c.laps) || 1)),
+      track: Math.max(0, Math.min(CIRCUITS.length - 1, Math.round(c.track) || 0)),
+      wet: !!c.wet,
+    };
     this.pushLobby();
   }
 
@@ -116,9 +122,9 @@ export class HostSession implements Session {
     this.racing = true;
     this.results = [];
     this.racers = new Set(this.players.map((p) => p.id));
-    const msg: Msg = { t: 'start', players: this.players, laps: this.laps };
+    const msg: Msg = { t: 'start', players: this.players, cfg: this.cfg };
     this.net.broadcast(msg);
-    this.onStart(this.players, this.laps);
+    this.onStart(this.players, this.cfg);
   }
 
   backToLobby() {
@@ -168,9 +174,9 @@ export class GuestSession implements Session {
   private handle(msg: Msg) {
     switch (msg.t) {
       case 'lobby':
-        return this.onLobby(msg.players, msg.laps, msg.racing);
+        return this.onLobby(msg.players, msg.cfg, msg.racing);
       case 'start':
-        return this.onStart(msg.players, msg.laps);
+        return this.onStart(msg.players, msg.cfg);
       case 'snap':
         return this.onSnap(msg.s);
       case 'results':
@@ -193,7 +199,7 @@ export class GuestSession implements Session {
   sendFinish(time: number) {
     this.net.toHost({ t: 'finish', time });
   }
-  setLaps() {}
+  configure() {}
   startRace() {}
   backToLobby() {}
   leave() {

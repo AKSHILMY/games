@@ -2,7 +2,7 @@
 
 const MUTE_KEY = 'pocketracers.muted';
 // Upper speed (m/s) of each gear; the engine note climbs within a gear then drops on the shift
-const GEARS = [9, 17, 25, 33, 41, 60];
+const GEARS = [10, 20, 30, 40, 52, 64, 84]; // m/s at the top of each gear (7th covers nitro speeds)
 
 class Sound {
   private ctx: AudioContext | null = null;

@@ -1,19 +1,20 @@
 import './ui/style.css';
-import { Stage } from './game/scene';
-import { Track } from './game/track';
+import { Stage, disposeTree } from './game/scene';
+import { CIRCUITS, Track } from './game/track';
 import { Race, type Standing } from './game/race';
 import { loadCarModel } from './game/carModel';
 import { buildScenery } from './game/scenery';
 import { isTouch, setupTouch } from './input/controls';
 import { Net } from './net/peer';
 import { GuestSession, HostSession, type Session } from './net/room';
-import type { PlayerInfo, ResultRow } from './net/protocol';
+import type { PlayerInfo, RaceConfig, ResultRow } from './net/protocol';
 import { $, Hud, confetti, renderPlayers, renderResults, show, toast } from './ui/screens';
 import { sound } from './audio/sound';
 
 const stage = new Stage($<HTMLCanvasElement>('gl'));
-const track = new Track();
-stage.scene.add(track.group, buildScenery(track));
+let track = new Track();
+let scenery = buildScenery(track);
+stage.scene.add(track.group, scenery);
 const hud = new Hud(track);
 const carModelReady = loadCarModel();
 stage.onQualityChange = (q) => race?.setShadows(q === 'high');
@@ -26,6 +27,8 @@ let race: Race | null = null;
 let results: ResultRow[] = [];
 let standings: Standing[] = [];
 let localFinished = false;
+let closesAt = 0; // when the race closes for cars still running (0 = nobody has finished yet)
+const FINISH_WINDOW = 30000; // like real racing: once the winner is home, the rest get 30 s to finish
 
 // ---------- name persistence ----------
 const NAME_KEY = 'pocketracers.name';
@@ -46,6 +49,26 @@ function takeName(id: string): string {
     /* private mode */
   }
   return name;
+}
+
+/** Switch to the host's circuit and weather (rebuilds the track only when the circuit changed). */
+function applyConfig(cfg: RaceConfig) {
+  if (cfg.track !== track.circuit && CIRCUITS[cfg.track]) {
+    stage.scene.remove(track.group, scenery);
+    disposeTree(track.group);
+    disposeTree(scenery);
+    track = new Track(cfg.track);
+    scenery = buildScenery(track);
+    stage.scene.add(track.group, scenery);
+    hud.setTrack(track);
+  }
+  track.setWet(cfg.wet);
+  stage.setWeather(cfg.wet);
+  const c = CIRCUITS[track.circuit];
+  // The host sees the choices in the dropdowns, so only describe the circuit; guests get everything
+  $('raceInfo').textContent = session?.isHost
+    ? c.blurb
+    : `${c.name} · ${c.blurb} · ${cfg.wet ? 'Wet' : 'Dry'} · ${cfg.laps} ${cfg.laps === 1 ? 'lap' : 'laps'}`;
 }
 
 // ---------- menu ----------
@@ -134,7 +157,12 @@ $('share').addEventListener('click', () => {
 });
 if (!('share' in navigator)) $('share').style.display = 'none';
 
-$<HTMLSelectElement>('laps').addEventListener('change', (e) => session?.setLaps(+(e.target as HTMLSelectElement).value));
+$<HTMLSelectElement>('circuit').innerHTML = CIRCUITS.map((c, i) => `<option value="${i}">${c.name}</option>`).join('');
+$<HTMLSelectElement>('circuit').addEventListener('change', (e) => session?.configure({ track: +(e.target as HTMLSelectElement).value }));
+$<HTMLSelectElement>('weather').addEventListener('change', (e) =>
+  session?.configure({ wet: (e.target as HTMLSelectElement).value === 'wet' }),
+);
+$<HTMLSelectElement>('laps').addEventListener('change', (e) => session?.configure({ laps: +(e.target as HTMLSelectElement).value }));
 $('start').addEventListener('click', () => session?.startRace());
 $('again').addEventListener('click', () => session?.backToLobby());
 $('endRace').addEventListener('click', () => session?.backToLobby());
@@ -149,9 +177,12 @@ function attach(s: Session) {
   $('resultsWait').style.display = s.isHost ? 'none' : '';
   $('endRace').style.display = s.isHost ? 'inline-block' : 'none';
 
-  s.onLobby = (players, laps, racing) => {
+  s.onLobby = (players, cfg, racing) => {
     renderPlayers(players, s.myId);
-    $<HTMLSelectElement>('laps').value = String(laps);
+    $<HTMLSelectElement>('laps').value = String(cfg.laps);
+    $<HTMLSelectElement>('circuit').value = String(cfg.track);
+    $<HTMLSelectElement>('weather').value = cfg.wet ? 'wet' : 'dry';
+    if (!race) applyConfig(cfg); // never swap the track under a race in progress
     $('waitMsg').textContent = s.isHost
       ? players.length > 1
         ? ''
@@ -168,37 +199,50 @@ function attach(s: Session) {
     if (!race) show('lobby');
   };
 
-  s.onStart = (players, laps) => startRace(players, laps);
+  s.onStart = (players, cfg) => startRace(players, cfg);
   s.onSnap = (states) => race?.receive(states);
   s.onResults = (rows) => {
     results = rows;
-    if (localFinished) renderResults(results, standings, s.myId);
+    // Start the finish window when the first result arrives, even if this tab isn't drawing frames
+    if (race && !closesAt && rows.length) closesAt = performance.now() + FINISH_WINDOW;
+    if (localFinished) refreshResults(!!race?.finished);
   };
   s.onEnd = (reason) => goHome(reason);
 
-  if (s.isHost) s.setLaps(3); // publishes the initial lobby
+  if (s.isHost) s.configure({}); // publishes the initial lobby
 }
 
 // ---------- race ----------
-async function startRace(players: PlayerInfo[], laps: number) {
+async function startRace(players: PlayerInfo[], cfg: RaceConfig) {
   if (!session) return;
   await carModelReady;
   race?.dispose();
+  race = null;
+  applyConfig(cfg);
   results = [];
   localFinished = false;
+  closesAt = 0;
   const s = session;
-  race = new Race(stage, track, s.myId, players, laps, {
+  race = new Race(stage, track, s.myId, players, cfg, {
     sendState: (st) => s.sendState(st),
     sendFinish: (t) => s.sendFinish(t),
     hud: (info) => {
       standings = info.standings;
+      const now = performance.now();
+      if (!closesAt && (info.finished || results.length || info.standings.some((x) => x.fin))) closesAt = now + FINISH_WINDOW;
+      const closed = closesAt > 0 && now >= closesAt;
+      if (closesAt && !closed && !info.finished && !info.banner) {
+        info.banner = `FINISH IN ${Math.ceil((closesAt - now) / 1000)}s`;
+      }
       hud.update(info, s.myId);
-      if (info.finished && !localFinished) {
-        localFinished = true;
-        const place = info.standings.findIndex((x) => x.id === s.myId) + 1;
-        $('resultsTitle').textContent = place === 1 && info.total > 1 ? 'You win! 🏆' : 'Finished!';
-        if (place === 1) confetti();
-        renderResults(results, standings, s.myId);
+      if (!info.finished && !closed) return;
+      // Keep the results live: other players keep finishing after us
+      const first = !localFinished;
+      localFinished = true;
+      if (first && !info.finished) race?.retire();
+      const place = refreshResults(info.finished);
+      if (first) {
+        if (info.finished && place === 1 && info.total > 1) confetti();
         show('hud', 'results');
       }
     },
@@ -206,6 +250,31 @@ async function startRace(players: PlayerInfo[], laps: number) {
   show('hud');
   (document.activeElement as HTMLElement | null)?.blur();
   if (import.meta.env.DEV) (window as unknown as { __race: Race }).__race = race; // for debugging in devtools
+}
+
+const ORDINAL = ['1st', '2nd', '3rd'];
+
+/** Redraw the results panel from the latest standings and host results; returns our place. */
+function refreshResults(finished: boolean): number {
+  if (!session) return 0;
+  const left = closesAt ? Math.ceil((closesAt - performance.now()) / 1000) : 0;
+  const closed = closesAt > 0 && left <= 0;
+  const { place, racing } = renderResults(results, standings, session.myId, closed);
+  $('resultsTitle').textContent = !finished
+    ? 'Race over: did not finish'
+    : standings.length < 2
+      ? 'Finished!'
+      : place === 1
+        ? 'You win! 🏆'
+        : `You finished ${ORDINAL[place - 1] ?? place + 'th'}`;
+  // Going back to the lobby ends the race for everyone, so the host waits until the others
+  // are home or the finish window has closed
+  const waiting = racing > 0 && !closed;
+  const again = $<HTMLButtonElement>('again');
+  again.disabled = waiting;
+  again.textContent = waiting ? `${racing} still racing · race closes in ${left}s` : 'Back to lobby';
+  $('resultsWait').textContent = waiting ? `${racing} still racing · race closes in ${left}s` : 'Waiting for the host…';
+  return place;
 }
 
 function endRace() {

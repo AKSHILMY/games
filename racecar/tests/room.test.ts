@@ -70,6 +70,19 @@ describe('host lobby', () => {
     expect(lobby.players[1].name).toBe('A very long na');
   });
 
+  it('validates race settings and sends them with the lobby and the start', () => {
+    net.join('g1');
+    host.configure({ track: 2, wet: true, laps: 99 });
+    const lobby = net.last('g1', 'lobby') as Extract<Msg, { t: 'lobby' }>;
+    expect(lobby.cfg).toEqual({ laps: 10, track: 2, wet: true });
+    host.configure({ track: 42 });
+    expect((net.last('g1', 'lobby') as Extract<Msg, { t: 'lobby' }>).cfg.track).toBe(2); // last circuit
+    host.configure({ laps: 2 });
+    host.startRace();
+    const start = net.last('g1', 'start') as Extract<Msg, { t: 'start' }>;
+    expect(start.cfg).toEqual({ laps: 2, track: 2, wet: true });
+  });
+
   it('removes a player who leaves', () => {
     net.join('g1');
     net.join('g2');

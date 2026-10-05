@@ -5,6 +5,7 @@ Lightweight multiplayer car racing in the browser. There is no login and no game
 - Low-poly 3D with Three.js: a CC0 race car model (Kenney Car Kit, about 27 KB) with steering and spinning wheels, body lean and brake lights; the track and scenery are generated in code
 - Shadows that follow the player, a gradient sky, tone mapping, and procedural asphalt and grass textures. Quality drops automatically if the frame rate stays below 45 fps
 - Peer-to-peer networking with PeerJS. The host relays positions to everyone else (star topology, up to 8 players)
+- Three circuits (Greenvale GP, Harbour Speedway, Canyon Ring) and dry or wet weather, picked by the host in the lobby. In the wet, grip drops to about 70%, tyres throw up spray, and the sky turns overcast and misty
 - Keyboard (WASD / arrow keys) and on-screen touch controls
 - About 225 KB gzipped in total, including the car model
 
@@ -13,7 +14,7 @@ Lightweight multiplayer car racing in the browser. There is no login and no game
 ```bash
 npm install
 npm run dev        # http://localhost:5173 (open a second tab to test multiplayer)
-npm test           # rankings, race simulation, host lobby/results logic, network smoothing
+npm test           # rankings, race simulation on every circuit, host lobby/results logic, network smoothing
 npm run build      # static site in dist/
 npm run preview    # serve the built site
 ```
@@ -25,8 +26,8 @@ npm run preview    # serve the built site
 | `src/net/peer.ts` | PeerJS wrapper. Each guest opens a reliable `ctl` channel and an unordered `st` channel to the host |
 | `src/net/room.ts` | `HostSession` (roster, colours, start, finish order, relaying) and `GuestSession` |
 | `src/net/protocol.ts` | Message types |
-| `src/game/track.ts` | Spline track, meshes, barriers, scenery, `LapCounter` (a lap counts only after passing all 4 quarters) |
-| `src/game/car.ts` | Arcade car physics (grip, drift, off-road, walls, car-to-car bumps) |
+| `src/game/track.ts` | `CIRCUITS` list, spline track, meshes, barriers, scenery, `LapCounter` (a lap counts only after passing all 4 quarters) |
+| `src/game/car.ts` | Arcade car physics (drift, off-road, walls, car-to-car bumps). Cornering is capped by tyre grip (about 2.6 g, lower in the wet), so you have to brake for hairpins |
 | `src/game/carModel.ts` | Car model loading, per-player paint, wheel/body animation, brake light |
 | `src/game/remotePose.ts` | Smooth playback of other players' cars. Updates are timed by the sender's clock, so network jitter doesn't cause stutter, and gaps are covered by dead reckoning |
 | `src/game/race.ts` | Race loop: fixed 60 Hz physics (drawn between steps, so it stays smooth on 120 Hz screens) and 20 Hz state sends |
