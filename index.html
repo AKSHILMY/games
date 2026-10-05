@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Games</title>
+    <meta name="description" content="Small browser games." />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎮</text></svg>" />
+    <style>
+      :root { color-scheme: light dark; --bg: #f5f7fa; --card: #fff; --ink: #0d1b2a; --muted: #5b6b7c; --accent: #ffb703; }
+      @media (prefers-color-scheme: dark) { :root { --bg: #0d1b2a; --card: #16283b; --ink: #f1f5f9; --muted: #9fb3c8; } }
+      body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--ink); font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; display: grid; place-items: center; }
+      main { width: min(560px, calc(100vw - 32px)); padding: 48px 0; }
+      h1 { font-size: 34px; margin: 0 0 6px; }
+      p { color: var(--muted); margin: 0 0 28px; }
+      a.card { display: flex; gap: 16px; align-items: center; padding: 18px 20px; border-radius: 14px; background: var(--card); color: inherit; text-decoration: none; box-shadow: 0 4px 18px rgba(0,0,0,.08); transition: transform .15s; }
+      a.card:hover { transform: translateY(-2px); }
+      .icon { font-size: 34px; }
+      .card b { font-size: 18px; display: block; }
+      .card span { color: var(--muted); font-size: 14px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Games</h1>
+      <p>Small games that run in your browser. No sign-up.</p>
+      <a class="card" href="racecar/">
+        <div class="icon">🏁</div>
+        <div><b>Pocket Racers</b><span>Multiplayer car racing: create a race, share the link, go.</span></div>
+      </a>
+    </main>
+  </body>
+</html>

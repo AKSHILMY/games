@@ -1,0 +1,19 @@
+# Separate repository with its own remote: never include it here
+software-ship/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Dependencies, builds, local output
+**/node_modules/
+**/dist/
+**/coverage/
+**/*.log
+_site/
+
+# Secrets and local overrides
+**/.env
+**/.env.*
+**/*.local
